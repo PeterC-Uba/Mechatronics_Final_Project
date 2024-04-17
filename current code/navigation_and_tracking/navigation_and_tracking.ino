@@ -5,6 +5,142 @@
 Pixy2 pixy;
 DualMAX14870MotorShield motors;
 
+class MatchData
+{
+  bool status = 0; // true = match in progress
+  int time = 0; // seconds
+  int x = 0; // cm
+  int y = 0; // cm
+
+  bool isWaitingForUpdate = false;
+
+  /*
+  * read in the match data as a String from the ZigBee module
+  * returns: String containing unparsed match data if available,
+  *   empty String if data is not available
+  */
+  String receiveData()
+  {
+    String RX = ""; // format: M,TTTT,XXX,YYY
+
+    int length = 0;
+    bool isFinished = true;
+
+    // first check if there's any data available at all before continuing
+    if (Serial1.available())
+    {
+      isFinished = false;
+    }
+
+    // continue concatenating all data to the output string
+    // THIS ASSUMES THE DATA IS FORMATTED AND BEING RECEIVED PROPERLY
+    while (!isFinished)
+    {
+      if (Serial1.available())
+      {
+        char incoming = Serial1.read();
+        RX.concat(incoming);
+        length++;
+      }
+      
+      if (length == 14)
+      {
+        isFinished = true;
+      }
+    }
+    
+    return RX;
+  }
+
+  void parseAndUpdate(String data)
+  {
+    String str_status = data.substring(0, 1);
+    String str_time = data.substring(2, 6);
+    String str_x = data.substring(7, 10);
+    String str_y = data.substring(11, 14);
+
+    // if the new data isn't complete, fall back on previous data
+    if (str_status.equals("?") || str_status.equals("/")
+    || str_time.equals("????") || str_time.equals("////")
+    || str_x.equals("---") || str_y.equals("---"))
+    {
+      return;
+    }
+    // new data is complete, go ahead with parsing
+
+    bool isValid = true;
+
+    bool status_new = str_status.equals("1");
+    int time_new = str_time.toInt();
+    int x_new = str_x.toInt();
+    int y_new = str_y.toInt();
+
+    // if the new data isn't valid for some reason, fall back on previous data
+    // otherwise, go ahead and update data
+    if (time_new < 0 || x_new < 0 || y_new < 0)
+    {
+      return;
+    }
+
+    status = status_new;
+    time = time_new;
+    x = x_new;
+    y = y_new;
+  }
+
+public:
+  bool getStatus() { return status; }
+  int getTime() { return time; }
+  int getX() { return x; }
+  int getY() { return y; }
+
+  void update()
+  {
+    // if the ZigBee hasn't been asked for an update yet, do that and return
+    if (!isWaitingForUpdate)
+    {
+      Serial1.print('?');
+      isWaitingForUpdate = true;
+      return;
+    }
+    // if we are waiting on the ZigBee module for an update, proceed
+
+    // check on incoming data from ZigBee module
+    String incoming = receiveData();
+    // if data actually received, parse it and update
+    if (!incoming.equals(""))
+    {
+      //Serial.print("received data: ");
+      //Serial.println(incoming);
+      parseAndUpdate(incoming);
+      //print();
+      // go back to requesting a new update
+      isWaitingForUpdate = false;
+    }
+  }
+
+  void print()
+  {
+    Serial.println("-----");
+
+    Serial.print("Match in progress: ");
+    Serial.println(status ? "YES" : "NO");
+
+    Serial.print("Match time: ");
+    Serial.print(time);
+    Serial.println(" s");
+
+    Serial.print("Robot position: (");
+    Serial.print(x);
+    Serial.print(", ");
+    Serial.print(y);
+    Serial.println(")");
+
+    Serial.println("-----");
+  }
+};
+MatchData match;
+
 class PID
 {
   const float Kp;
@@ -116,17 +252,26 @@ float speedAdjust = 0;
 
 void setup()
 {
-  Serial.begin(115200);
+  Serial.begin(115200); // console output
+  Serial1.begin(115200); // communicating w/ ZigBee (for match data)
 
+  delay(500);
+
+  /*
   pixy.init();
   motors.enableDrivers();
-  motors.flipM2(true);
+  motors.flipM2(true); // flipped so both go forward with positive speeds
 
-  //puckTracker.start();
+  puckTracker.start();
+  */
 }
 
 void loop()
 {
+  // fetch latest match data from ZigBee
+  match.update();
+  
+  /*
   screenPosPuck = pixyScan(PixySignature::PUCK, 3);
   Serial.print("Puck Screen Pos: (");
   Serial.print(screenPosPuck.x);
@@ -147,6 +292,7 @@ void loop()
 
   motors.setM1Speed(0 + speedAdjust);
   motors.setM2Speed(0 - speedAdjust);
+  */
 
   /*
   screenPosGoal1 = pixyScan(PixySignature::GOAL1, 1);
@@ -181,7 +327,7 @@ void loop()
   Serial.println("");
   */
 
-  delay(100);
+  delay(50);
 }
 
 ScreenPos pixyScan(PixySignature signatureBitmap, int maxBlocks)
