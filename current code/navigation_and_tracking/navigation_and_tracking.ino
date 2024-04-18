@@ -1,10 +1,17 @@
 #include <Pixy2.h>
 #include <DualMAX14870MotorShield.h>
 #include "FireTimer.h"
+#include <Wire.h>
+#include <Adafruit_BNO055.h>
+#include <math.h>
 
 Pixy2 pixy;
 DualMAX14870MotorShield motors;
 
+/*
+* handles ZigBee communication
+* also receives and stores current match data
+*/
 class MatchData
 {
   bool status = 0; // true = match in progress
@@ -94,6 +101,11 @@ public:
   int getX() { return x; }
   int getY() { return y; }
 
+  void setup()
+  {
+    Serial1.begin(115200); // communicating w/ ZigBee (for match data)
+  }
+
   void update()
   {
     // if the ZigBee hasn't been asked for an update yet, do that and return
@@ -141,6 +153,11 @@ public:
 };
 MatchData match;
 
+/*
+* object that acts as an independent PID
+* takes in values for the coefficients, a clamp for the output, and a clamp for the integral component
+* the compute function takes in the input and setpoint, as well as updates the output directly by reference
+*/
 class PID
 {
   const float Kp;
@@ -155,7 +172,6 @@ class PID
 
   const unsigned int samplePeriod_ms;
 
-  float setpoint = 0;
   float i = 0;
 
   float curError = 0;
@@ -194,12 +210,16 @@ public:
 
   void start()
   {
-    setpoint = 0;
-
-    curError = 0;
-    lastError = 0;
+    reset();
 
     timer.start();
+  }
+
+  void reset()
+  {
+    curError = 0;
+    lastError = 0;
+    i = 0;
   }
 
   void compute(float input, float setpoint, float &output)
@@ -211,12 +231,217 @@ public:
   }
 };
 
+/*
+* stores position and orientation data
+* these will be computed relatively based on match data (for position) and the IMU (for orientation)
+* this will also handle determining which zone the robot is in, as well as moving to a target position
+*/
+class Movement
+{
+  const float RAD2DEG = 180 / 3.14159;
+
+  const int MOTOR_SPEED_F = 110; // range from -400 to 400
+  const int MOTOR_SPEED_B = 130; // range from -400 to 400
+
+  Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
+
+  float baseAngle = 0;
+
+  float angle = 0;
+  int x = 0;
+  int y = 0;
+
+  enum {
+    NONE,
+    TARGET_SET,
+    MOVE_TO_POS,
+    MOVE_TO_ANGLE
+  } targetState;
+  int targetX = 0;
+  int targetY = 0;
+  float targetAngle = 0;
+  float targetAngleIntermediate = 0;
+
+  float speedAdjust = 0;
+
+  //PID pid_movement = PID(2.4, 3.5, 0.01, -400, 400);
+  PID pid_movement = PID(1, 0, 0, -400, 400);
+  //PID pid_turning = PID(20, 5, 0, -400, 400);
+  PID pid_turning = PID(2, 0.1, 0, -400, 400);
+
+  bool aboutEquals(float test, float target)
+  {
+    return abs(target - test) <= 1;
+  }
+
+  float angleError(float input, float setpoint)
+  {
+    float e = setpoint - input;
+    if (e > 180)
+    {
+      e -= 360;
+    }
+    else if (e < -180)
+    {
+      e += 360;
+    }
+
+    return e;
+  }
+
+  float wrapAngle(float input)
+  {
+    return input - 360 * floor(input/360);
+  }
+
+public:
+  void setup()
+  {
+    if (!bno.begin())
+    {
+      Serial.println("BNO055 IMU not detected!");
+      while (1);
+    }
+
+    pid_movement.start();
+    pid_turning.start();
+
+    sensors_event_t orientationData;
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+
+    baseAngle = orientationData.orientation.x;
+  }
+
+  void update(int x, int y)
+  {
+    sensors_event_t orientationData;
+    bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+
+    // offset the angle by the base angle and wrap to [0, 360)
+    angle = wrapAngle(orientationData.orientation.x - baseAngle);
+
+    switch (targetState)
+    {
+      // initial target has been set:
+      // move to the orientation required to go forward to the correct position
+      case TARGET_SET:
+        Serial.println("TARGET SET:");
+        pid_turning.compute(angleError(angle, targetAngleIntermediate), 0, speedAdjust);
+        motors.setM1Speed(0 + speedAdjust);
+        motors.setM2Speed(0 - speedAdjust);
+        Serial.print("\tangle: ");
+        Serial.print(angle);
+        Serial.print(" | target: ");
+        Serial.print(targetAngleIntermediate);
+        Serial.print(" | error: ");
+        Serial.println(angleError(angle, targetAngleIntermediate));
+        Serial.print("\tspeedAdjust: ");
+        Serial.println(speedAdjust);
+
+        if (aboutEquals(angle, targetAngleIntermediate))
+        {
+          targetState = MOVE_TO_POS;
+          pid_movement.reset();
+        }
+        break;
+
+      // we're facing the correct position now:
+      // move to the correct position
+      case MOVE_TO_POS:
+        Serial.println("MOVE TO POS:");
+        /*
+        pid_movement.compute(angleError(angle, targetAngleIntermediate), 0, speedAdjust);
+        motors.setM1Speed(MOTOR_SPEED_F + speedAdjust);
+        motors.setM2Speed(MOTOR_SPEED_F - speedAdjust);
+        Serial.print("\tangle: ");
+        Serial.print(angle);
+        Serial.print(" | target: ");
+        Serial.print(targetAngleIntermediate);
+        Serial.print(" | error: ");
+        Serial.println(angleError(angle, targetAngleIntermediate));
+        Serial.print("\tspeedAdjust: ");
+        Serial.println(speedAdjust);
+        Serial.print("\tposition: (");
+        Serial.print(x);
+        Serial.print(", ");
+        Serial.print(y);
+        Serial.print(") | target: (");
+        Serial.print(targetX);
+        Serial.print(", ");
+        Serial.print(targetY);
+        Serial.print(") | error: (");
+        Serial.print(targetX - x);
+        Serial.print(", ");
+        Serial.print(targetY - y);
+        Serial.println(")");
+        */
+
+        //if (aboutEquals(x, targetX) && aboutEquals(y, targetY))
+        //{
+          // no target angle set, we're done here
+          if (targetAngle < 0)
+          {
+            targetState = NONE;
+            speedAdjust = 0;
+            motors.setM1Speed(0);
+            motors.setM2Speed(0);
+          }
+          else
+          {
+            targetState = MOVE_TO_ANGLE;
+            pid_turning.reset();
+          }
+        //}
+        break;
+
+      // we're in the correct position now:
+      // move to the correct orientation (if there is a target angle set)
+      case MOVE_TO_ANGLE:
+        Serial.println("MOVE TO ANGLE:");
+        pid_turning.compute(angleError(angle, targetAngle), 0, speedAdjust);
+        motors.setM1Speed(0 + speedAdjust);
+        motors.setM2Speed(0 - speedAdjust);
+        Serial.print("\tangle: ");
+        Serial.print(angle);
+        Serial.print(" | target: ");
+        Serial.print(targetAngle);
+        Serial.print(" | error: ");
+        Serial.println(angleError(angle, targetAngle));
+
+        if (aboutEquals(angle, targetAngle))
+        {
+          targetState = NONE;
+          speedAdjust = 0;
+          motors.setM1Speed(0);
+          motors.setM2Speed(0);
+        }
+        break;
+
+      // else (case NONE) do nothing
+    }
+  }
+
+  void setTarget(int targetX, int targetY, int targetAngle)
+  {
+    targetState = TARGET_SET;
+    this->targetX = targetX;
+    this->targetY = targetY;
+    this->targetAngle = targetAngle;
+
+    float t = atan2f(x - targetX, targetY - y) * RAD2DEG;
+    targetAngleIntermediate = wrapAngle(t);
+    speedAdjust = 0;
+    pid_turning.reset();
+  }
+};
+Movement movement;
+
 // number = bitmap to select for that signature (1 byte, 128-place specifies color codes)
 enum PixySignature
 {
   PUCK = 1, // orange, 
   GOAL1 = 2, // red
-  GOAL2 = 4, // pink
+  GOAL2 = 4 // pink
 };
 
 struct ScreenPos
@@ -242,7 +467,7 @@ struct ScreenPos
 ScreenPos SCREEN_POS_CENTER(315/2, 207/2);
 ScreenPos SCREEN_POS_NULL(-1, -1);
 
-PID puckTracker(2, 0, 0, -400, 400);
+PID pid_puckTracker = PID(2, 0, 0, -400, 400);
 
 ScreenPos screenPosPuck;
 ScreenPos screenPosGoal1;
@@ -253,23 +478,24 @@ float speedAdjust = 0;
 void setup()
 {
   Serial.begin(115200); // console output
-  Serial1.begin(115200); // communicating w/ ZigBee (for match data)
+  match.setup();
+  movement.setup();
 
   delay(500);
-
-  /*
-  pixy.init();
+  
+  //pixy.init();
   motors.enableDrivers();
   motors.flipM2(true); // flipped so both go forward with positive speeds
 
-  puckTracker.start();
-  */
+  //puckTracker.start();
+  movement.setTarget(10, 10, 45);
 }
 
 void loop()
 {
   // fetch latest match data from ZigBee
   match.update();
+  movement.update(match.getX(), match.getY());
   
   /*
   screenPosPuck = pixyScan(PixySignature::PUCK, 3);
