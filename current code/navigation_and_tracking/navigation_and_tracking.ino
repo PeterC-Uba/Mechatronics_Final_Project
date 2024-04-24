@@ -257,7 +257,6 @@ class Movement
   const float RAD2DEG = 180 / 3.14159;
 
   const int MOTOR_SPEED_F = 150; // range from -400 to 400
-  const int MOTOR_SPEED_B = 150; // range from -400 to 400
 
   const unsigned long STOP_PERIOD = 400; // MS to wait between hitting target position and swinging to target angle
   unsigned long stopTime = 0;
@@ -286,11 +285,11 @@ class Movement
   float speedAdjust = 0;
 
   //PID pid_adjustTurning = PID(2.4, 3.5, 0.01, -400, 400);
-  PID pid_adjustTurning = PID(10, 0, 20, -400, 400);
-  PID pid_pureTurning = PID(10, 10, 20, -400, 400, -75, 75);
+  PID pid_adjustTurning = PID(10, 0, 20, -200, 200);
+  PID pid_pureTurning = PID(10, 10, 20, -200, 200, -75, 75);
   //PID pid_pureTurning = PID(10, 10, 20, -400, 400, -50, 50);
 
-  PID pid_movement = PID(5, 0, 5, -MOTOR_SPEED_B, MOTOR_SPEED_F);
+  PID pid_movement = PID(5, 0, 5, 0, MOTOR_SPEED_F);
 
   unsigned long abeTimePos = 0;
   unsigned long abePrevTimePos = 0;
@@ -324,7 +323,7 @@ class Movement
   unsigned long abeTimeAngle = 0;
   unsigned long abePrevTimeAngle = 0;
   const unsigned long ABOUTEQUALS_TIMER_ANGLE = 100; // time in MS angle should be within the threshold before returning true
-  const float ABOUTEQUALS_RANGE_ANGLE = 1; // angle in degrees -> [target - range, target + range]
+  const float ABOUTEQUALS_RANGE_ANGLE = 1.5; // angle in degrees -> [target - range, target + range]
   bool aboutEqualsAngle(float testAngle, float targetAngle)
   {
     // check if in range using square distance (sqrt is slow, idk how relevant that is tho for this application tbh)
@@ -699,13 +698,16 @@ ScreenPos screenPosGoal2;
 
 float speedAdjust = 0;
 
+unsigned long waitTimer = 0;
+const unsigned long TIME_TO_WAIT = 1000;
 void setup()
 {
   Serial.begin(115200); // console output
+
+  delay(2000);
+
   match.setup();
   movement.setup();
-
-  delay(500);
   
   //pixy.init();
   motors.enableDrivers();
@@ -714,15 +716,16 @@ void setup()
   //puckTracker.start();
   //movement.setTarget(10, 10, 45);
   //movement.setTargetAngle(45);
+  waitTimer = millis();
 }
 
 int i = -1;
 bool b = true;
 int targets[][3] = {
   {35, 35, 45}, // red right corner
-  {35, 95, 315}, // red left corner
-  {205, 95, 135}, // pink right corner
-  {205, 25, 225}, // pink left corner
+  {35, 90, 315}, // red left corner
+  {195, 90, 225}, // pink right corner
+  {195, 35, 135}, // pink left corner
   {120, 60, 0}, // center, facing pink
   {120, 60, 180} // center, facing red
   //{10, 10, 90},
@@ -736,6 +739,11 @@ void loop()
   // fetch latest match data from ZigBee
   match.update();
   movement.update(match.getX(), match.getY());
+
+  if (millis() - waitTimer < TIME_TO_WAIT)
+  {
+    return;
+  }
 
   //match.print();
   //movement.print();
