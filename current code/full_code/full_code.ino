@@ -244,6 +244,156 @@ public:
   }
 };
 
+struct ScreenPos
+{
+  int x;
+  int y;
+
+  ScreenPos(int x = -1, int y = -1) : x(x), y(y) { }
+
+  ScreenPos& operator=(const ScreenPos& other)
+  {
+    x = other.x;
+    y = other.y;
+    return *this;
+  }
+
+  bool operator==(const ScreenPos& other) const
+  {
+    return (x == other.x && y == other.y);
+  }
+};
+const ScreenPos SCREEN_POS_CENTER = ScreenPos(315/2, 207/2);
+const ScreenPos SCREEN_POS_NULL = ScreenPos(-1, -1);
+
+class PixyVision
+{
+  Pixy2 pixy;
+
+  // number = bitmap to select for that signature (1 byte, 128-place specifies color codes)
+  enum PixySignature
+  {
+    PUCK = 1, // orange, 
+    GOAL_RED = 2, // red
+    GOAL_PINK = 4 // pink
+  };
+
+  unsigned long puckScreenTime = 0; 
+  int lastDir = 0; // -1 for left, 1 for right
+  const unsigned long PUCK_FIND_DURATION = 1000; // ms to look towards the side of the screen the puck disappeared from before giving up
+
+  float speedAdjust = 0;
+
+  ScreenPos pixyScan(PixySignature signatureBitmap, int maxBlocks)
+  {
+    /*
+    false -> don't wait for block data to continue
+    PixySignature -> specifies which signature to select
+    int -> max blocks to select (sorted by size)
+    */
+    uint8_t numBlocks = pixy.ccc.getBlocks(false, signatureBitmap, maxBlocks);
+
+    // didn't find any objects, break out of the method immediately
+    if (pixy.ccc.blocks <= 0)
+    {
+      return SCREEN_POS_NULL;
+    }
+
+    int xsum = 0;
+    int ysum = 0;
+    for (uint8_t i = 0; i < numBlocks; i++)
+    {
+      Block curBlock = pixy.ccc.blocks[i];
+      xsum += curBlock.m_x;
+      ysum += curBlock.m_y;
+    }
+
+    return ScreenPos(xsum / numBlocks, ysum / numBlocks);
+  }
+
+public:
+  void setup()
+  {
+    pixy.init();
+  }
+
+  ScreenPos scanPuck()
+  {
+    ScreenPos screenPosPuck = pixyScan(PixySignature::PUCK, 3);
+    if (!(screenPosPuck == SCREEN_POS_NULL))
+    {
+      lastDir = (screenPosPuck.x - SCREEN_POS_CENTER.x < 0) ? 1 : -1;
+      puckScreenTime = millis();
+    }
+
+    return screenPosPuck;
+  }
+
+  /*
+  * -1 = off the left side of the screen
+  * 0 = been too long since it disappeared from the screen
+  * 1 = off the right side of the screen
+  */
+  int findPuck()
+  {
+    unsigned long curTime = millis();
+    if (curTime - puckScreenTime <= PUCK_FIND_DURATION)
+    {
+      Serial.print("puck screen timer: ");
+      Serial.println(curTime - puckScreenTime);
+      return lastDir;
+    }
+
+    return 0;
+  }
+
+  ScreenPos scanRedGoal()
+  {
+    
+    ScreenPos screenPosGoalRed = pixyScan(PixySignature::GOAL_RED, 1);
+    return screenPosGoalRed;
+
+    /*
+    Serial.print("Red Goal Screen Pos: (");
+    Serial.print(screenPosGoalRed.x);
+    Serial.print(", ");
+    Serial.print(screenPosGoalRed.y);
+    Serial.print(") => error: ");
+    if (screenPosGoalRed == SCREEN_POS_NULL)
+    {
+      Serial.println("not on screen");
+    }
+    else
+    {
+      Serial.println(SCREEN_POS_CENTER.x - screenPosGoalRed.x);
+    }
+    */
+  }
+
+  ScreenPos scanPinkGoal()
+  {
+    ScreenPos screenPosGoalPink = pixyScan(PixySignature::GOAL_PINK, 1);
+    return screenPosGoalPink;
+
+    /*
+    Serial.print("Pink Goal Screen Pos: (");
+    Serial.print(screenPosGoalPink.x);
+    Serial.print(", ");
+    Serial.print(screenPosGoalPink.y);
+    Serial.print(") => error: ");
+    if (screenPosGoalPink == SCREEN_POS_NULL)
+    {
+      Serial.println("not on screen");
+    }
+    else
+    {
+      Serial.println(SCREEN_POS_CENTER.x - screenPosGoalPink.x);
+    }
+    Serial.println(""); 
+    */
+  }
+};
+
 struct Target
 {
   int x;
@@ -269,6 +419,23 @@ class Movement
 
   Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28, &Wire);
   DualMAX14870MotorShield motors;
+  PixyVision pixyVision;
+
+  const int PIN_BEAMBREAK = 2;
+
+  enum {
+    RED_TEAM, // defending red goal (closer to origin), attacking pink
+    PINK_TEAM // defending pink goal, attacking red goal
+  } team;
+
+  enum {
+    GAME_OVER,
+    CHASE_PUCK,
+    ATTACK,
+    DEFEND
+  } robotState;
+
+  bool _hasPuck = false;
 
   float baseAngle = 0;
 
@@ -290,13 +457,14 @@ class Movement
 
   float turnAdjust = 0;
   float speedAdjust = 0;
+  float trackAdjust = 0;
 
   //PID pid_adjustTurning = PID(2.4, 3.5, 0.01, -400, 400);
   PID pid_adjustTurning = PID(10, 0, 20, -400, 400);
   PID pid_pureTurning = PID(10, 10, 20, -200, 200, -75, 75);
   //PID pid_pureTurning = PID(10, 10, 20, -400, 400, -50, 50);
-
   PID pid_movement = PID(5, 0, 5, 0, MOTOR_SPEED_F);
+  PID pid_puckTracker = PID(2, 0, 4, -200, 200, -75, 75);
 
   unsigned long abeTimePos = 0;
   unsigned long abePrevTimePos = 0;
@@ -386,6 +554,47 @@ class Movement
     return pow(y2 - y1, 2) + pow(x2 - x1, 2);
   }
 
+  void trackPuck()
+  {
+    ScreenPos screenPosPuck = pixyVision.scanPuck();
+
+    Serial.print("Puck Screen Pos: (");
+    Serial.print(screenPosPuck.x);
+    Serial.print(", ");
+    Serial.print(screenPosPuck.y);
+    Serial.print(")");
+    float s;
+    if (screenPosPuck == SCREEN_POS_NULL)
+    {
+      int lastDir = pixyVision.findPuck();
+      Serial.print("lastDir: ");
+      Serial.println(lastDir);
+      if (lastDir == 0)
+      {
+        s = 0;
+        trackAdjust = 0;
+        Serial.println(" => not on screen -- stop searching");
+      }
+      else
+      {
+        s = 0;
+        trackAdjust = lastDir * 100;
+        Serial.print(" => not on screen -- still looking => ");
+        Serial.println(trackAdjust);
+      }
+    }
+    else
+    {
+      s = MOTOR_SPEED_F;
+      pid_puckTracker.compute(screenPosPuck.x, SCREEN_POS_CENTER.x, trackAdjust);
+      Serial.print(" => ");
+      Serial.println(trackAdjust);
+    }
+    
+    
+    setMotorSpeed(s - trackAdjust, s + trackAdjust);
+  }
+
 public:
   void setup()
   {
@@ -395,13 +604,19 @@ public:
       while (1);
     }
 
+    pixyVision.setup();
+
     motors.enableDrivers();
     motors.flipM2(true);
 
     pid_adjustTurning.start();
     pid_pureTurning.start();
-
     pid_movement.start();
+    pid_puckTracker.start();
+
+    team = RED_TEAM;
+    robotState = CHASE_PUCK;
+    pinMode(PIN_BEAMBREAK, INPUT_PULLUP); 
 
     sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
@@ -423,6 +638,11 @@ public:
     Serial.println(angle);
   }
 
+  void setMotorSpeed(float leftSpeed, float rightSpeed)
+  {
+    motors.setM1Speed(rightSpeed);
+    motors.setM2Speed(leftSpeed);
+  }
 
   unsigned long tempTimer = 0;
   void update(int x, int y)
@@ -436,10 +656,46 @@ public:
     // offset the angle by the base angle and wrap to [0, 360)
     angle = wrapAngle(-orientationData.orientation.x + baseAngle);
 
+    int bb = digitalRead(PIN_BEAMBREAK);
+    if (bb == LOW)
+    {
+      _hasPuck = true;
+    }
+    else
+    {
+      _hasPuck = false;
+    }
+
+    switch (robotState)
+    {
+      case CHASE_PUCK:
+      {
+        trackPuck();
+        break;
+      }
+      
+      case ATTACK:
+      {
+        setTarget(team == RED_TEAM ? TG_ATTACK_CENTER_PINK : TG_ATTACK_CENTER_RED);
+        break;
+      }
+
+      case DEFEND:
+      {
+        setTarget(team == RED_TEAM ? TG_DEFEND_RED : TG_DEFEND_PINK);
+        break;
+      }
+
+      default: // GAME_OVER
+      {
+        break;
+      }
+    }
     
     if (targetState == NONE)
     {
-      Serial.println("---- NO TARGET");
+      //Serial.println("---- NO TARGET");
+      //trackPuck();
     }
     else
     {
@@ -461,8 +717,7 @@ public:
       {
         Serial.println("TARGET SET:");
         pid_pureTurning.compute(-angleError(angle, targetAngleIntermediate), 0, turnAdjust);
-        motors.setM1Speed(0 + turnAdjust);
-        motors.setM2Speed(0 - turnAdjust);
+        setMotorSpeed(0 - turnAdjust, 0 + turnAdjust);
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
@@ -494,8 +749,7 @@ public:
         
         pid_adjustTurning.compute(-angleError(angle, targetAngleIntermediate), 0, turnAdjust);
         pid_movement.compute(-squareDist, 0, speedAdjust);
-        motors.setM1Speed(speedAdjust + turnAdjust);
-        motors.setM2Speed(speedAdjust - turnAdjust);
+        setMotorSpeed(speedAdjust - turnAdjust, speedAdjust + turnAdjust);
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
@@ -537,8 +791,7 @@ public:
       case STOP:
       {
         Serial.println("BRIEF PAUSE TO SETTLE");
-        motors.setM1Speed(0);
-        motors.setM2Speed(0);
+        setMotorSpeed(0, 0);
 
         unsigned long curTime = millis();
         if (curTime - stopTime >= STOP_PERIOD)
@@ -548,8 +801,7 @@ public:
           {
             targetState = NONE;
             turnAdjust = 0;
-            motors.setM1Speed(0);
-            motors.setM2Speed(0);
+            setMotorSpeed(0, 0);
           }
           else
           {
@@ -566,8 +818,7 @@ public:
       {
         Serial.println("MOVE TO ANGLE:");
         pid_pureTurning.compute(-angleError(angle, targetAngle), 0, turnAdjust);
-        motors.setM1Speed(0 + turnAdjust);
-        motors.setM2Speed(0 - turnAdjust);
+        setMotorSpeed(0 - turnAdjust, 0 + turnAdjust);
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
@@ -579,8 +830,7 @@ public:
         {
           targetState = NONE;
           turnAdjust = 0;
-          motors.setM1Speed(0);
-          motors.setM2Speed(0);
+          setMotorSpeed(0, 0);
         }
         break;
       }
@@ -596,8 +846,7 @@ public:
     /* CODE ONLY USED FOR TURNING PID TEST
     Serial.println("TARGET SET:");
     pid_pureTurning.compute(-angleError(angle, targetAngle), 0, speedAdjust);
-    motors.setM1Speed(0 + speedAdjust);
-    motors.setM2Speed(0 - speedAdjust);
+    setMotorSpeed(0 - speedAdjust, 0 + speedAdjust);
     Serial.print("\tangle: ");
     Serial.print(angle);
     Serial.print(" | target: ");
@@ -612,8 +861,7 @@ public:
     Serial.println("FORWARD MOVEMENT SET:");
     targetAngle = 0;
     pid_adjustMovement.compute(-angleError(angle, targetAngle), 0, speedAdjust);
-    motors.setM1Speed(MOTOR_SPEED_F + speedAdjust);
-    motors.setM2Speed(MOTOR_SPEED_F - speedAdjust);
+    setMotorSpeed(MOTOR_SPEED_F - speedAdjust, MOTOR_SPEED_F + speedAdjust);
     Serial.print("\tangle: ");
     Serial.print(angle);
     Serial.print(" | target: ");
@@ -632,6 +880,23 @@ public:
   }
   */
 
+public:
+  const Target TG_ATTACK_CENTER_RED = Target(45, 60, 180);
+  const Target TG_ATTACK_LEFT_RED = Target(35, 35, 135);
+  const Target TG_ATTACK_RIGHT_RED = Target(35, 90, 225);
+
+  const Target TG_ATTACK_CENTER_PINK = Target(190, 60, 0);
+  const Target TG_ATTACK_LEFT_PINK = Target(205, 90, 315);
+  const Target TG_ATTACK_RIGHT_PINK = Target(205, 35, 45);
+
+  const Target TG_DEFEND_PINK = Target(205, 60, 180);
+  const Target TG_DEFEND_RED = Target(35, 60, 0);
+
+  bool hasPuck()
+  {
+    return _hasPuck;
+  }
+
   void setTarget(Target target)
   {
     targetState = TARGET_SET;
@@ -646,8 +911,7 @@ public:
       {
         targetState = NONE;
         turnAdjust = 0;
-        motors.setM1Speed(0);
-        motors.setM2Speed(0);
+        setMotorSpeed(0, 0);
       }
       else
       {
@@ -673,208 +937,9 @@ public:
 };
 Movement movement;
 
-class PixyVision
-{
-  Pixy2 pixy;
-
-  // number = bitmap to select for that signature (1 byte, 128-place specifies color codes)
-  enum PixySignature
-  {
-    PUCK = 1, // orange, 
-    GOAL_RED = 2, // red
-    GOAL_PINK = 4 // pink
-  };
-
-  struct ScreenPos
-  {
-    int x;
-    int y;
-
-    ScreenPos(int x = -1, int y = -1) : x(x), y(y) { }
-
-    ScreenPos& operator=(const ScreenPos& other)
-    {
-      x = other.x;
-      y = other.y;
-      return *this;
-    }
-
-    bool operator==(const ScreenPos& other) const
-    {
-      return (x == other.x && y == other.y);
-    }
-  };
-  const ScreenPos SCREEN_POS_CENTER = ScreenPos(315/2, 207/2);
-  const ScreenPos SCREEN_POS_NULL = ScreenPos(-1, -1);
-
-  PID pid_puckTracker = PID(2, 0, 0, -400, 400);
-
-  ScreenPos screenPosPuck;
-  ScreenPos screenPosGoalRed;
-  ScreenPos screenPosGoalPink;
-
-  float speedAdjust = 0;
-
-  ScreenPos pixyScan(PixySignature signatureBitmap, int maxBlocks)
-  {
-    /*
-    false -> don't wait for block data to continue
-    PixySignature -> specifies which signature to select
-    int -> max blocks to select (sorted by size)
-    */
-    uint8_t numBlocks = pixy.ccc.getBlocks(false, signatureBitmap, maxBlocks);
-
-    // didn't find any objects, break out of the method immediately
-    if (pixy.ccc.blocks <= 0)
-    {
-      return SCREEN_POS_NULL;
-    }
-
-    int xsum = 0;
-    int ysum = 0;
-    for (uint8_t i = 0; i < numBlocks; i++)
-    {
-      Block curBlock = pixy.ccc.blocks[i];
-      xsum += curBlock.m_x;
-      ysum += curBlock.m_y;
-    }
-
-    return ScreenPos(xsum / numBlocks, ysum / numBlocks);
-  }
-
-public:
-  void setup()
-  {
-    pixy.init();
-
-    pid_puckTracker.start();
-  }
-
-  bool scanPuck()
-  {
-    screenPosPuck = pixyScan(PixySignature::PUCK, 3);
-    /*
-    Serial.print("Puck Screen Pos: (");
-    Serial.print(screenPosPuck.x);
-    Serial.print(", ");
-    Serial.print(screenPosPuck.y);
-    Serial.print(")");
-    if (screenPosPuck == SCREEN_POS_NULL)
-    {
-      speedAdjust = 0;
-      Serial.println(" => not on screen");
-    }
-    else
-    {
-      pid_puckTracker.compute(screenPosPuck.x, SCREEN_POS_CENTER.x, speedAdjust);
-      Serial.print(" => ");
-      Serial.println(speedAdjust);
-    }
-    */
-
-    /*
-    motors.setM1Speed(0 + speedAdjust);
-    motors.setM2Speed(0 - speedAdjust);
-    */
-  }
-
-  bool scanRedGoal()
-  {
-    
-    screenPosGoalRed = pixyScan(PixySignature::GOAL_RED, 1);
-    /*
-    Serial.print("Red Goal Screen Pos: (");
-    Serial.print(screenPosGoalRed.x);
-    Serial.print(", ");
-    Serial.print(screenPosGoalRed.y);
-    Serial.print(") => error: ");
-    if (screenPosGoalRed == SCREEN_POS_NULL)
-    {
-      Serial.println("not on screen");
-    }
-    else
-    {
-      Serial.println(SCREEN_POS_CENTER.x - screenPosGoalRed.x);
-    }
-    */
-  }
-
-  bool scanPinkGoal()
-  {
-    screenPosGoalPink = pixyScan(PixySignature::GOAL_PINK, 1);
-    /*
-    Serial.print("Pink Goal Screen Pos: (");
-    Serial.print(screenPosGoalPink.x);
-    Serial.print(", ");
-    Serial.print(screenPosGoalPink.y);
-    Serial.print(") => error: ");
-    if (screenPosGoalPink == SCREEN_POS_NULL)
-    {
-      Serial.println("not on screen");
-    }
-    else
-    {
-      Serial.println(SCREEN_POS_CENTER.x - screenPosGoalPink.x);
-    }
-    Serial.println(""); 
-    */
-  }
-};
-PixyVision pixyVision;
-
 class RobotStateMachine
 {
-  int i = 0;
-
-  enum {
-    RED_TEAM, // defending red goal (closer to origin), attacking pink
-    PINK_TEAM // defending pink goal, attacking red goal
-  } team;
-
-  enum {
-    STOP,
-    CHASE_PUCK,
-    ATTACK,
-    DEFEND
-  } state;
-
-public:
-  const Target TG_ATTACK_CENTER_RED = Target(45, 60, 180);
-  const Target TG_ATTACK_LEFT_RED = Target(35, 35, 135);
-  const Target TG_ATTACK_RIGHT_RED = Target(35, 90, 225);
-
-  const Target TG_ATTACK_CENTER_PINK = Target(190, 60, 0);
-  const Target TG_ATTACK_LEFT_PINK = Target(205, 90, 315);
-  const Target TG_ATTACK_RIGHT_PINK = Target(205, 35, 45);
-
-  const Target TG_DEFEND_PINK = Target(205, 60, 180);
-  const Target TG_DEFEND_RED = Target(35, 60, 0);
-
-  void update()
-  {
-    switch (state)
-    {
-      case CHASE_PUCK:
-      {
-        break;
-      }
-      
-      case ATTACK:
-      {
-        break;
-      }
-
-      case DEFEND:
-      {
-        break;
-      }
-
-      default:
-      {
-        break;
-      }
-    }
-  }
+  
 };
 RobotStateMachine stateMachine;
 
@@ -888,12 +953,12 @@ void setup()
 
   match.setup();
   movement.setup();
-  
-  //pixyVision.setup();
 
   //movement.setTarget(10, 10, 45);
   //movement.setTargetAngle(45);
   waitTimer = millis();
+
+  //movement.setMotorSpeed(150, 150);
 }
 
 int i = -1;
@@ -905,6 +970,7 @@ Target targets[] = {
   Target(205, 35, 135), // pink left corner
   Target(120, 60, 0), // center, facing pink
   Target(120, 60, 180), // center, facing red
+  /*
   stateMachine.TG_ATTACK_CENTER_RED,
   stateMachine.TG_ATTACK_LEFT_RED,
   stateMachine.TG_ATTACK_RIGHT_RED,
@@ -914,6 +980,7 @@ Target targets[] = {
   stateMachine.TG_DEFEND_RED,
   stateMachine.TG_DEFEND_PINK,
   stateMachine.TG_DEFEND_RED
+  */
 };
 int targets_len = 15;
 
@@ -931,6 +998,7 @@ void loop()
   //match.print();
   //movement.print();
 
+  /*
   if (b)
   {
     if (!movement.isTargeting())
@@ -945,6 +1013,7 @@ void loop()
     movement.setTarget(targets[i]);
     b = true;
   }
+  */
 
   delay(50);
 }
