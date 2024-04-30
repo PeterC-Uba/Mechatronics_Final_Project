@@ -43,6 +43,7 @@ class MatchData
       if (Serial1.available())
       {
         char incoming = Serial1.read();
+        ///Serial.println(incoming);
         RX.concat(incoming);
         length++;
       }
@@ -109,6 +110,7 @@ public:
     if (!isWaitingForUpdate)
     {
       Serial1.print('?');
+      //Serial.println("requesting match update");
       isWaitingForUpdate = true;
       return;
     }
@@ -403,6 +405,19 @@ struct Target
   Target(int x, int y, float angle) : x(x), y(y), angle(angle) { }
 };
 
+//const Target TG_ATTACK_CENTER_RED = Target(45, 60, 180);
+const Target TG_ATTACK_CENTER_RED = Target(30, 60, 180);
+const Target TG_ATTACK_LEFT_RED = Target(35, 35, 135);
+const Target TG_ATTACK_RIGHT_RED = Target(35, 90, 225);
+
+//const Target TG_ATTACK_CENTER_PINK = Target(190, 60, 0);
+const Target TG_ATTACK_CENTER_PINK = Target(210, 60, 0);
+const Target TG_ATTACK_LEFT_PINK = Target(205, 90, 315);
+const Target TG_ATTACK_RIGHT_PINK = Target(205, 35, 45);
+
+const Target TG_DEFEND_PINK = Target(205, 60, 180);
+const Target TG_DEFEND_RED = Target(35, 60, 0);
+
 /*
 * stores position and orientation data
 * these will be computed relatively based on match data (for position) and the IMU (for orientation)
@@ -422,6 +437,7 @@ class Movement
   PixyVision pixyVision;
 
   const int PIN_BEAMBREAK = 2;
+  const int PIN_TEAM = 3;
 
   enum {
     RED_TEAM, // defending red goal (closer to origin), attacking pink
@@ -554,7 +570,7 @@ class Movement
     return pow(y2 - y1, 2) + pow(x2 - x1, 2);
   }
 
-  void trackPuck()
+  bool trackPuck()
   {
     ScreenPos screenPosPuck = pixyVision.scanPuck();
 
@@ -564,6 +580,7 @@ class Movement
     Serial.print(screenPosPuck.y);
     Serial.print(")");
     float s;
+    bool b = true;
     if (screenPosPuck == SCREEN_POS_NULL)
     {
       int lastDir = pixyVision.findPuck();
@@ -574,6 +591,7 @@ class Movement
         s = 0;
         trackAdjust = 0;
         Serial.println(" => not on screen -- stop searching");
+        b = false;
       }
       else
       {
@@ -591,8 +609,8 @@ class Movement
       Serial.println(trackAdjust);
     }
     
-    
     setMotorSpeed(s - trackAdjust, s + trackAdjust);
+    return b;
   }
 
 public:
@@ -609,14 +627,26 @@ public:
     motors.enableDrivers();
     motors.flipM2(true);
 
+    pinMode(PIN_BEAMBREAK, INPUT_PULLUP); 
+    pinMode(PIN_TEAM, INPUT_PULLUP);
+
     pid_adjustTurning.start();
     pid_pureTurning.start();
     pid_movement.start();
     pid_puckTracker.start();
 
-    team = RED_TEAM;
+    int t = digitalRead(PIN_TEAM);
+    if (t == LOW)
+    {
+      team = RED_TEAM;
+    }
+    else
+    {
+      team = PINK_TEAM;
+    }
+    Serial.print("TEAM: ");
+    Serial.println(team == RED_TEAM ? "RED" : "PINK");
     robotState = CHASE_PUCK;
-    pinMode(PIN_BEAMBREAK, INPUT_PULLUP); 
 
     sensors_event_t orientationData;
     bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
@@ -644,7 +674,10 @@ public:
     motors.setM2Speed(leftSpeed);
   }
 
-  unsigned long tempTimer = 0;
+  unsigned long defendTimer = 0;
+  const unsigned long DEFEND_WAIT_DURATION = 2000; // ms to wait for puck to reappear before going back to defending
+  unsigned long puckGrabTimer = 0;
+  const unsigned long PUCK_GRAB_DURATION = 500; // ms to wait after losing puck before switching to chase mode
   void update(int x, int y)
   {
     this->x = x;
@@ -660,37 +693,14 @@ public:
     if (bb == LOW)
     {
       _hasPuck = true;
+      puckGrabTimer = millis();
     }
     else
     {
       _hasPuck = false;
     }
 
-    switch (robotState)
-    {
-      case CHASE_PUCK:
-      {
-        trackPuck();
-        break;
-      }
-      
-      case ATTACK:
-      {
-        setTarget(team == RED_TEAM ? TG_ATTACK_CENTER_PINK : TG_ATTACK_CENTER_RED);
-        break;
-      }
-
-      case DEFEND:
-      {
-        setTarget(team == RED_TEAM ? TG_DEFEND_RED : TG_DEFEND_PINK);
-        break;
-      }
-
-      default: // GAME_OVER
-      {
-        break;
-      }
-    }
+    unsigned long curTime = millis();
     
     if (targetState == NONE)
     {
@@ -718,6 +728,7 @@ public:
         Serial.println("TARGET SET:");
         pid_pureTurning.compute(-angleError(angle, targetAngleIntermediate), 0, turnAdjust);
         setMotorSpeed(0 - turnAdjust, 0 + turnAdjust);
+        
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
@@ -726,14 +737,12 @@ public:
         Serial.println(angleError(angle, targetAngleIntermediate));
         Serial.print("\tturnAdjust: ");
         Serial.println(turnAdjust);
-
+        
         if (aboutEqualsAngle(angle, targetAngleIntermediate))
         {
           targetState = MOVE_TO_POS;
           pid_adjustTurning.reset();
           pid_movement.reset();
-
-          tempTimer = millis();
         }
         break;
       }
@@ -750,6 +759,7 @@ public:
         pid_adjustTurning.compute(-angleError(angle, targetAngleIntermediate), 0, turnAdjust);
         pid_movement.compute(-squareDist, 0, speedAdjust);
         setMotorSpeed(speedAdjust - turnAdjust, speedAdjust + turnAdjust);
+        
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
@@ -769,7 +779,6 @@ public:
         Serial.print(") | square distance: ");
         Serial.println(squareDist);
         
-        
         if (aboutEqualsPosition(x, y, targetX, targetY))
         {
           stopTime = millis();
@@ -781,7 +790,7 @@ public:
         if (curTime - tempTimer >= 2000) // wait time since we don't have position checking up yet
         {
           stopTime = curTime;
-          targetState = STOP;
+          targetState = NONE;
         }
         */
         
@@ -819,13 +828,14 @@ public:
         Serial.println("MOVE TO ANGLE:");
         pid_pureTurning.compute(-angleError(angle, targetAngle), 0, turnAdjust);
         setMotorSpeed(0 - turnAdjust, 0 + turnAdjust);
+        
         Serial.print("\tangle: ");
         Serial.print(angle);
         Serial.print(" | target: ");
         Serial.print(targetAngle);
         Serial.print(" | error: ");
         Serial.println(angleError(angle, targetAngle));
-
+        
         if (aboutEqualsAngle(angle, targetAngle))
         {
           targetState = NONE;
@@ -837,6 +847,56 @@ public:
 
       // else (case NONE) do nothing
       default:
+      {
+        break;
+      }
+    }
+
+    switch (robotState)
+    {
+      case CHASE_PUCK:
+      {
+        Serial.println("----- CHASE PUCK -----");
+        bool track = trackPuck();
+
+        /*
+        if (!track) // lost track of puck for too long
+        {
+          setTarget(team == RED_TEAM ? TG_DEFEND_RED : TG_DEFEND_PINK); 
+          robotState = DEFEND;
+        }
+        */
+
+        if (_hasPuck)
+        {
+          setTarget(team == RED_TEAM ? TG_ATTACK_CENTER_PINK : TG_ATTACK_CENTER_RED);
+          robotState = ATTACK;
+        }
+        break;
+      }
+      
+      case ATTACK:
+      {
+        Serial.println("----- ATTACK -----");
+        if (curTime - puckGrabTimer >= PUCK_GRAB_DURATION)
+        {
+          resetTarget();
+          robotState = CHASE_PUCK;
+        }
+        break;
+      }
+
+      case DEFEND:
+      {
+        Serial.println("----- DEFEND -----");
+        if (targetState == NONE) // has reached the defend position)
+        {
+          robotState = CHASE_PUCK;
+        }
+        break;
+      }
+
+      default: // GAME_OVER
       {
         break;
       }
@@ -880,18 +940,6 @@ public:
   }
   */
 
-public:
-  const Target TG_ATTACK_CENTER_RED = Target(45, 60, 180);
-  const Target TG_ATTACK_LEFT_RED = Target(35, 35, 135);
-  const Target TG_ATTACK_RIGHT_RED = Target(35, 90, 225);
-
-  const Target TG_ATTACK_CENTER_PINK = Target(190, 60, 0);
-  const Target TG_ATTACK_LEFT_PINK = Target(205, 90, 315);
-  const Target TG_ATTACK_RIGHT_PINK = Target(205, 35, 45);
-
-  const Target TG_DEFEND_PINK = Target(205, 60, 180);
-  const Target TG_DEFEND_RED = Target(35, 60, 0);
-
   bool hasPuck()
   {
     return _hasPuck;
@@ -904,14 +952,15 @@ public:
     targetY = target.y;
     targetAngle = target.angle;
 
+    turnAdjust = 0;
+    setMotorSpeed(0, 0);
+
     if (aboutEqualsPosition(x, y, targetX, targetY))
     {
       // no target angle set, we're done here
       if (targetAngle < 0)
       {
         targetState = NONE;
-        turnAdjust = 0;
-        setMotorSpeed(0, 0);
       }
       else
       {
@@ -926,8 +975,13 @@ public:
     targetAngleIntermediate = wrapAngle(t);
     */
     targetAngleIntermediate = angleBetween(x, y, targetX, targetY);
-    turnAdjust = 0;
     pid_pureTurning.reset();
+  }
+
+  void resetTarget()
+  {
+    targetState = NONE;
+    setMotorSpeed(0, 0);
   }
 
   bool isTargeting()
@@ -961,6 +1015,7 @@ void setup()
   //movement.setMotorSpeed(150, 150);
 }
 
+/*
 int i = -1;
 bool b = true;
 Target targets[] = {
@@ -970,7 +1025,7 @@ Target targets[] = {
   Target(205, 35, 135), // pink left corner
   Target(120, 60, 0), // center, facing pink
   Target(120, 60, 180), // center, facing red
-  /*
+  
   stateMachine.TG_ATTACK_CENTER_RED,
   stateMachine.TG_ATTACK_LEFT_RED,
   stateMachine.TG_ATTACK_RIGHT_RED,
@@ -980,15 +1035,17 @@ Target targets[] = {
   stateMachine.TG_DEFEND_RED,
   stateMachine.TG_DEFEND_PINK,
   stateMachine.TG_DEFEND_RED
-  */
 };
 int targets_len = 15;
+*/
 
 void loop()
 {
   // fetch latest match data from ZigBee
   match.update();
+  //match.print();
   movement.update(match.getX(), match.getY());
+  //movement.update(60, 60);
 
   if (millis() - waitTimer < TIME_TO_WAIT)
   {
