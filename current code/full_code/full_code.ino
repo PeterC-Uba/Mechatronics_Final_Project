@@ -405,15 +405,15 @@ struct Target
   Target(int x, int y, float angle) : x(x), y(y), angle(angle) { }
 };
 
-//const Target TG_ATTACK_CENTER_RED = Target(45, 60, 180);
-const Target TG_ATTACK_CENTER_RED = Target(30, 60, 180);
+//const Target TG_ATTACK_CENTER_RED = Target(40, 60, 180);
+const Target TG_ATTACK_CENTER_RED = Target(25, 60, 180);
 const Target TG_ATTACK_LEFT_RED = Target(35, 35, 135);
 const Target TG_ATTACK_RIGHT_RED = Target(35, 90, 225);
 
-//const Target TG_ATTACK_CENTER_PINK = Target(190, 60, 0);
+//const Target TG_ATTACK_CENTER_PINK = Target(195, 60, 0);
 const Target TG_ATTACK_CENTER_PINK = Target(210, 60, 0);
-const Target TG_ATTACK_LEFT_PINK = Target(205, 90, 315);
-const Target TG_ATTACK_RIGHT_PINK = Target(205, 35, 45);
+const Target TG_ATTACK_LEFT_PINK = Target(200, 90, 315);
+const Target TG_ATTACK_RIGHT_PINK = Target(200, 35, 45);
 
 const Target TG_DEFEND_PINK = Target(205, 60, 180);
 const Target TG_DEFEND_RED = Target(35, 60, 0);
@@ -485,7 +485,7 @@ class Movement
   unsigned long abeTimePos = 0;
   unsigned long abePrevTimePos = 0;
   const unsigned long ABOUTEQUALS_TIMER_POSITION = 100; // time in MS position should be within the threshold before returning true
-  const float ABOUTEQUALS_RANGE_POSITION = pow(3, 2); // square distance in CM(^2)
+  const float ABOUTEQUALS_RANGE_POSITION = pow(5, 2); // square distance in CM(^2)
   bool aboutEqualsPosition(float testX, float testY, float targetX, float targetY)
   {
     // check if in range using square distance (sqrt is slow, idk how relevant that is tho for this application tbh)
@@ -596,7 +596,7 @@ class Movement
       else
       {
         s = 0;
-        trackAdjust = lastDir * 100;
+        trackAdjust = lastDir * 150; 
         Serial.print(" => not on screen -- still looking => ");
         Serial.println(trackAdjust);
       }
@@ -1046,6 +1046,7 @@ void loop()
   //match.print();
   movement.update(match.getX(), match.getY());
   //movement.update(60, 60);
+  //delay(1000);
 
   if (millis() - waitTimer < TIME_TO_WAIT)
   {
