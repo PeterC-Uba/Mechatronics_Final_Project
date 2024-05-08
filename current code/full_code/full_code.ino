@@ -448,7 +448,8 @@ class Movement
     GAME_OVER,
     CHASE_PUCK,
     ATTACK,
-    DEFEND
+    DEFEND,
+    UNSTUCK
   } robotState;
 
   bool _hasPuck = false;
@@ -485,7 +486,7 @@ class Movement
   unsigned long abeTimePos = 0;
   unsigned long abePrevTimePos = 0;
   const unsigned long ABOUTEQUALS_TIMER_POSITION = 100; // time in MS position should be within the threshold before returning true
-  const float ABOUTEQUALS_RANGE_POSITION = pow(5, 2); // square distance in CM(^2)
+  const float ABOUTEQUALS_RANGE_POSITION = pow(4, 2); // square distance in CM(^2)
   bool aboutEqualsPosition(float testX, float testY, float targetX, float targetY)
   {
     // check if in range using square distance (sqrt is slow, idk how relevant that is tho for this application tbh)
@@ -678,6 +679,14 @@ public:
   const unsigned long DEFEND_WAIT_DURATION = 2000; // ms to wait for puck to reappear before going back to defending
   unsigned long puckGrabTimer = 0;
   const unsigned long PUCK_GRAB_DURATION = 500; // ms to wait after losing puck before switching to chase mode
+  unsigned long unstuckMoveTimer = 0;
+  const unsigned long UNSTUCK_MOVE_DURATION = 1000; // ms to move backwards after getting stuck
+  unsigned long unstuckActivateTimer = 0;
+  const unsigned long UNSTUCK_ACTIVATE_DURATION = 3000; // ms to wait when stuck before moving backwards
+
+  int lastX = 0;
+  int lastY = 0;
+
   void update(int x, int y)
   {
     this->x = x;
@@ -689,18 +698,37 @@ public:
     // offset the angle by the base angle and wrap to [0, 360)
     angle = wrapAngle(-orientationData.orientation.x + baseAngle);
 
+    unsigned long curTime = millis();
+
     int bb = digitalRead(PIN_BEAMBREAK);
     if (bb == LOW)
     {
       _hasPuck = true;
-      puckGrabTimer = millis();
+      puckGrabTimer = curTime;
     }
     else
     {
       _hasPuck = false;
     }
 
-    unsigned long curTime = millis();
+    
+    if (targetState == NONE && robotState != UNSTUCK)
+    {
+      if (!aboutEqualsPosition(lastX, lastY, x, y))
+      {
+        lastX = x;
+        lastY = y;
+        unstuckActivateTimer = curTime;
+      }
+    }
+
+    if (curTime - unstuckActivateTimer >= UNSTUCK_ACTIVATE_DURATION && robotState != UNSTUCK)
+    {
+      resetTarget();
+      robotState = UNSTUCK;
+      unstuckMoveTimer = curTime;
+    }
+    
     
     if (targetState == NONE)
     {
@@ -802,7 +830,6 @@ public:
         Serial.println("BRIEF PAUSE TO SETTLE");
         setMotorSpeed(0, 0);
 
-        unsigned long curTime = millis();
         if (curTime - stopTime >= STOP_PERIOD)
         {
           // no target angle set, we're done here
@@ -858,14 +885,12 @@ public:
       {
         Serial.println("----- CHASE PUCK -----");
         bool track = trackPuck();
-
-        /*
+        
         if (!track) // lost track of puck for too long
         {
-          setTarget(team == RED_TEAM ? TG_DEFEND_RED : TG_DEFEND_PINK); 
+          setTarget(team == RED_TEAM ? TG_DEFEND_RED : TG_DEFEND_PINK);
           robotState = DEFEND;
         }
-        */
 
         if (_hasPuck)
         {
@@ -892,6 +917,24 @@ public:
         if (targetState == NONE) // has reached the defend position)
         {
           robotState = CHASE_PUCK;
+        }
+        break;
+      }
+
+      case UNSTUCK:
+      {
+        Serial.println("----- UNSTUCK -----");
+        Serial.print("cur time: ");
+        Serial.print(curTime);
+        Serial.print(" | move timer: ");
+        Serial.print(unstuckMoveTimer);
+        Serial.print(" | duration: ");
+        Serial.println(curTime - unstuckMoveTimer);
+        setMotorSpeed(-150, -150);
+        if (curTime - unstuckMoveTimer >= UNSTUCK_MOVE_DURATION)
+        {
+          robotState = CHASE_PUCK;
+          unstuckActivateTimer = curTime;
         }
         break;
       }
@@ -991,12 +1034,6 @@ public:
 };
 Movement movement;
 
-class RobotStateMachine
-{
-  
-};
-RobotStateMachine stateMachine;
-
 unsigned long waitTimer = 0;
 const unsigned long TIME_TO_WAIT = 1000;
 void setup()
@@ -1043,6 +1080,17 @@ void loop()
 {
   // fetch latest match data from ZigBee
   match.update();
+  
+  /*
+  if (!match.getStatus())
+  {
+    Serial.println("***** MATCH STOPPED *****");
+    movement.resetTarget();
+    movement.setMotorSpeed(0, 0);
+    return;
+  }
+  */
+
   //match.print();
   movement.update(match.getX(), match.getY());
   //movement.update(60, 60);
